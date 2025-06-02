@@ -2,12 +2,13 @@ import streamlit as st
 import json # Needed for loading Google credentials from string if stored as a single TOML string
 
 # --- Streamlit Configuration (MUST be first) ---
-st.set_page_config(page_title="Dice.com Job Application Bot", page_icon="🤖", layout="wide") # Changed to wide for more fields
+st.set_page_config(page_title="Dice.com Job Application Bot", page_icon="🤖", layout="wide")
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.os_manager import ChromeType # << --- ADD THIS IMPORT
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
@@ -15,7 +16,7 @@ import time
 import traceback
 import logging
 import gspread
-from google.oauth2.service_account import Credentials # Using google-auth for service account
+from google.oauth2.service_account import Credentials
 from datetime import datetime
 import pytz
 
@@ -50,7 +51,7 @@ def login_to_dice(driver, dice_email_param, dice_password_param):
     try:
         logging.info("Step 1: Entering email.")
         email_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "email")))
-        email_input.send_keys(dice_email_param) # Uses parameter
+        email_input.send_keys(dice_email_param)
         time.sleep(ACTION_DELAY)
 
         logging.info("Clicking 'Continue' button.")
@@ -60,7 +61,7 @@ def login_to_dice(driver, dice_email_param, dice_password_param):
 
         logging.info("Step 2: Entering password.")
         password_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "password")))
-        password_input.send_keys(dice_password_param) # Uses parameter
+        password_input.send_keys(dice_password_param)
         time.sleep(ACTION_DELAY)
 
         logging.info("Clicking final 'Sign In' button.")
@@ -78,7 +79,6 @@ def login_to_dice(driver, dice_email_param, dice_password_param):
 
 def search_and_apply(driver, job_title, location, worksheet):
     """Searches for jobs, applies filters, and processes listings, logging successes."""
-    # This function remains largely the same internally
     logging.info(f"Starting job search for '{job_title}' in '{location}'.")
     driver.get("https://www.dice.com/dashboard")
 
@@ -223,7 +223,6 @@ def search_and_apply(driver, job_title, location, worksheet):
             logging.error(traceback.format_exc())
             break
 
-# Modified to accept dice_email, dice_password, and spreadsheet_id from UI
 def start_bot_task(job_title, location, dice_email_ui, dice_password_ui, spreadsheet_id_ui, status_placeholder):
     """Main bot task function"""
     worksheet = None
@@ -240,7 +239,7 @@ def start_bot_task(job_title, location, dice_email_ui, dice_password_ui, spreads
             scopes=['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         )
         client = gspread.authorize(scoped_credentials)
-        spreadsheet = client.open_by_key(spreadsheet_id_ui) # Uses spreadsheet_id from UI
+        spreadsheet = client.open_by_key(spreadsheet_id_ui)
         worksheet = spreadsheet.sheet1
         logging.info("SUCCESS: Connected to Google Sheets.")
         status_placeholder.success("✅ Connected to Google Sheets successfully.")
@@ -250,9 +249,6 @@ def start_bot_task(job_title, location, dice_email_ui, dice_password_ui, spreads
         logging.error(traceback.format_exc())
         status_placeholder.error(f"❌ Error connecting to Google Sheets: {e}")
         return
-
-    # Credentials (dice_email_ui, dice_password_ui, spreadsheet_id_ui) are now passed as arguments
-    # and checked in the UI section before calling this function.
 
     status_placeholder.info(f"🚀 Starting Bot for: {job_title} in {location} using Dice email: {dice_email_ui}")
     driver = None
@@ -267,15 +263,18 @@ def start_bot_task(job_title, location, dice_email_ui, dice_password_ui, spreads
         options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
         try:
-            service = Service(ChromeDriverManager().install())
+            # --- MODIFIED SECTION for ChromeDriver ---
+            # Explicitly tell webdriver-manager to use the CHROMIUM browser type
+            service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+            # --- END OF MODIFIED SECTION ---
             driver = webdriver.Chrome(service=service, options=options)
         except Exception as e_driver:
-            logging.error(f"Failed to initialize Chrome Driver with webdriver-manager: {e_driver}")
+            logging.error(f"Failed to initialize Chrome Driver: {e_driver}")
             status_placeholder.error(f"❌ Failed to initialize Chrome Driver: {e_driver}. Check logs.")
             return
 
         status_placeholder.info("🔐 Logging in to Dice.com...")
-        login_to_dice(driver, dice_email_ui, dice_password_ui) # Pass UI credentials
+        login_to_dice(driver, dice_email_ui, dice_password_ui)
 
         status_placeholder.success("✅ Login successful! Processing jobs...")
         search_and_apply(driver, job_title, location, worksheet)
@@ -312,15 +311,11 @@ with col4:
 
 st.markdown("---")
 st.subheader("📊 Google Sheet Configuration")
-# Using the provided spreadsheet ID as a default value
 spreadsheet_id_ui_input = st.text_input("Google Spreadsheet ID:", value="1ML4bC7XVwQys-MR0TH8ujk5Fu3RtLxyUfJLC92Gzxqk", key="spreadsheet_id_ui")
-
 
 st.markdown("---")
 
-# Search button
 if st.button("🔍 Find and Apply for Jobs", type="primary", use_container_width=True):
-    # Validate all new inputs
     if not (job_title_ui.strip() and location_ui.strip() and
             dice_email_ui_input.strip() and dice_password_ui_input.strip() and
             spreadsheet_id_ui_input.strip()):
@@ -332,7 +327,7 @@ if st.button("🔍 Find and Apply for Jobs", type="primary", use_container_width
                 job_title_ui.strip(),
                 location_ui.strip(),
                 dice_email_ui_input.strip(),
-                dice_password_ui_input.strip(), # Password is sent as is
+                dice_password_ui_input.strip(),
                 spreadsheet_id_ui_input.strip(),
                 status_placeholder
             )
@@ -340,6 +335,5 @@ if st.button("🔍 Find and Apply for Jobs", type="primary", use_container_width
             st.error(f"❌ An error occurred during bot execution: {str(e)}")
             st.exception(e)
 
-# Footer
 st.markdown("---")
 st.markdown("Google Service Account credentials for Sheets are loaded securely from Streamlit Secrets.")

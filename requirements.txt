@@ -2,5 +2,5 @@ streamlit
 selenium
 webdriver-manager
 gspread
-oauth2client
+google-auth  # Replace oauth2client with this
 pytz

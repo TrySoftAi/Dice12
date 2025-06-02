@@ -8,7 +8,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType # << --- ADD THIS IMPORT
+from webdriver_manager.core.os_manager import ChromeType # For specifying Chromium
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
@@ -22,10 +22,6 @@ import pytz
 
 # --- Basic Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# --- Main Configuration ---
-# DICE_EMAIL, DICE_PASSWORD, SPREADSHEET_ID will now come from UI inputs.
-# Google Service Account credentials will still be loaded from secrets.
 
 # --- SPEED CONFIGURATION ---
 ACTION_DELAY = 1.5
@@ -43,7 +39,6 @@ def log_to_google_sheet(worksheet, job_title):
         logging.error(f"Failed to log to Google Sheets: {e}")
         logging.error(traceback.format_exc())
 
-# Modified to accept email and password as parameters
 def login_to_dice(driver, dice_email_param, dice_password_param):
     """Performs a full two-step login to Dice.com."""
     logging.info("Initiating full two-step login to Dice.com...")
@@ -80,11 +75,32 @@ def login_to_dice(driver, dice_email_param, dice_password_param):
 def search_and_apply(driver, job_title, location, worksheet):
     """Searches for jobs, applies filters, and processes listings, logging successes."""
     logging.info(f"Starting job search for '{job_title}' in '{location}'.")
-    driver.get("https://www.dice.com/dashboard")
+    driver.get("https://www.dice.com/dashboard") # Navigate to dashboard (or search page directly if URL is known)
 
     logging.info("Locating search fields on the dashboard.")
-    job_title_field = WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.NAME, "q")))
-    location_field = WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.NAME, "location")))
+    
+    # !!! --- USER ACTION REQUIRED: VERIFY AND UPDATE SELECTORS BELOW --- !!!
+    # The TimeoutException occurred here. You need to manually inspect Dice.com's dashboard
+    # after logging in to find the correct current selectors for these fields.
+    # Example: If the job title field now has id="jobSearch", you'd use (By.ID, "jobSearch")
+    
+    try:
+        # TODO: USER - Verify this selector. Is 'name="q"' still correct for the job title input?
+        job_title_selector = (By.NAME, "q") 
+        job_title_field = WebDriverWait(driver, 20).until(EC.presence_of_element_located(job_title_selector)) # Increased wait time a bit
+        logging.info(f"Job title field found using {job_title_selector}")
+
+        # TODO: USER - Verify this selector. Is 'name="location"' still correct for the location input?
+        location_selector = (By.NAME, "location")
+        location_field = WebDriverWait(driver, 10).until(EC.presence_of_element_located(location_selector))
+        logging.info(f"Location field found using {location_selector}")
+
+    except TimeoutException as e:
+        logging.error(f"Timeout finding search fields. Page might have changed or not loaded correctly. Current URL: {driver.current_url}")
+        # driver.save_screenshot("debug_search_fields_timeout.png") # Helpful for local debugging
+        raise # Re-raise the exception to be caught by start_bot_task
+
+    # --- End of USER ACTION REQUIRED section for selectors ---
 
     job_title_field.clear()
     job_title_field.send_keys(job_title)
@@ -95,11 +111,17 @@ def search_and_apply(driver, job_title, location, worksheet):
     time.sleep(0.5)
 
     logging.info("Clicking the main search button.")
-    search_button = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='job-search-search-bar-search-button']")))
+    # TODO: USER - Verify this selector for the search button if issues persist.
+    search_button_selector = (By.CSS_SELECTOR, "[data-testid='job-search-search-bar-search-button']")
+    search_button = WebDriverWait(driver, 15).until(EC.element_to_be_clickable(search_button_selector))
     search_button.click()
 
     logging.info("Pausing for 5 seconds to let the results page load...")
-    time.sleep(5)
+    time.sleep(5) # Adjust if search results take longer to appear
+
+    # ... (rest of the search_and_apply function remains the same as before) ...
+    # Make sure selectors inside this function for filters, job links, next button, etc., are also still valid.
+    # I'll keep them as they were, but be aware they might also need updates if Dice.com changed significantly.
 
     try:
         logging.info("Attempting to click 'All filters' button...")
@@ -127,8 +149,8 @@ def search_and_apply(driver, job_title, location, worksheet):
         logging.info("Filters applied and panel closed successfully.")
 
     except TimeoutException:
-        logging.error("CRITICAL: Could not find or click an element in the filter panel.")
-        raise
+        logging.warning("Could not find or click an element in the filter panel. Proceeding without all filters if some were applied.")
+        # Not raising here to allow continuation if, for example, filters were already applied or not strictly necessary
 
     logging.info("Waiting for filtered job list to refresh...")
     time.sleep(3)
@@ -137,15 +159,20 @@ def search_and_apply(driver, job_title, location, worksheet):
     while True:
         logging.info(f"--- Processing Page {page_number} ---")
         job_links_selector = (By.CSS_SELECTOR, "a[data-testid='job-search-job-detail-link']")
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located(job_links_selector))
+        try:
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located(job_links_selector))
+        except TimeoutException:
+            logging.info("No more job links found or page did not load as expected. Ending process for this search.")
+            break # Exit the while loop if no job links are found
 
-        job_elements = driver.find_elements(job_links_selector[0], job_links_selector[1])
+        job_elements = driver.find_elements(job_links_selector[0], job_links_selector[1]) # This line had an error before, ensure it's correct now
         job_count = len(job_elements)
         logging.info(f"Found {job_count} jobs on this page. Starting application process...")
 
         if job_count == 0:
-            logging.info("No more jobs found on this page or subsequent pages.")
-            break
+            logging.info("No jobs found on this page to process.")
+            # Check for "next" button even if no jobs, in case of empty intermediate pages
+            pass # Will proceed to "next page" check
 
         original_window = driver.current_window_handle
 
@@ -186,7 +213,7 @@ def search_and_apply(driver, job_title, location, worksheet):
                     log_to_google_sheet(worksheet, job_name)
                     time.sleep(ACTION_DELAY)
                 except TimeoutException:
-                    logging.warning(f"Job '{job_name}' is not an 'Easy Apply' job or failed to load. Skipping.")
+                    logging.warning(f"Job '{job_name}' is not an 'Easy Apply' job or failed to load elements in apply flow. Skipping.")
                 finally:
                     if len(driver.window_handles) > 1:
                         driver.close()
@@ -263,10 +290,8 @@ def start_bot_task(job_title, location, dice_email_ui, dice_password_ui, spreads
         options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
         try:
-            # --- MODIFIED SECTION for ChromeDriver ---
             # Explicitly tell webdriver-manager to use the CHROMIUM browser type
             service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-            # --- END OF MODIFIED SECTION ---
             driver = webdriver.Chrome(service=service, options=options)
         except Exception as e_driver:
             logging.error(f"Failed to initialize Chrome Driver: {e_driver}")

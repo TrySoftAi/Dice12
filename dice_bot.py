@@ -2,12 +2,12 @@ import streamlit as st
 import json # Needed for loading Google credentials from string if stored as a single TOML string
 
 # --- Streamlit Configuration (MUST be first) ---
-st.set_page_config(page_title="Dice.com Job Application Bot", page_icon="🤖", layout="centered")
+st.set_page_config(page_title="Dice.com Job Application Bot", page_icon="🤖", layout="wide") # Changed to wide for more fields
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager # Keep for local, might be handled by Streamlit Cloud
+from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
@@ -15,7 +15,6 @@ import time
 import traceback
 import logging
 import gspread
-# from oauth2client.service_account import ServiceAccountCredentials # Deprecated
 from google.oauth2.service_account import Credentials # Using google-auth for service account
 from datetime import datetime
 import pytz
@@ -23,14 +22,9 @@ import pytz
 # --- Basic Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- Main Configuration - Fetched from Streamlit Secrets ---
-# These will be set in your Streamlit Cloud app settings
-DICE_EMAIL = st.secrets.get("DICE_EMAIL", "your_default_email_if_not_set") # Add defaults or handle if None
-DICE_PASSWORD = st.secrets.get("DICE_PASSWORD", "your_default_password_if_not_set")
-SPREADSHEET_ID = st.secrets.get("SPREADSHEET_ID", "your_default_spreadsheet_id_if_not_set")
-
-# Google Service Account credentials will be loaded from secrets as a dictionary
-# The variable SERVICE_ACCOUNT_FILE is no longer used to load the file directly.
+# --- Main Configuration ---
+# DICE_EMAIL, DICE_PASSWORD, SPREADSHEET_ID will now come from UI inputs.
+# Google Service Account credentials will still be loaded from secrets.
 
 # --- SPEED CONFIGURATION ---
 ACTION_DELAY = 1.5
@@ -48,14 +42,15 @@ def log_to_google_sheet(worksheet, job_title):
         logging.error(f"Failed to log to Google Sheets: {e}")
         logging.error(traceback.format_exc())
 
-def login_to_dice(driver):
+# Modified to accept email and password as parameters
+def login_to_dice(driver, dice_email_param, dice_password_param):
     """Performs a full two-step login to Dice.com."""
     logging.info("Initiating full two-step login to Dice.com...")
     driver.get("https://www.dice.com/dashboard/login")
     try:
         logging.info("Step 1: Entering email.")
         email_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "email")))
-        email_input.send_keys(DICE_EMAIL) # Uses secret
+        email_input.send_keys(dice_email_param) # Uses parameter
         time.sleep(ACTION_DELAY)
 
         logging.info("Clicking 'Continue' button.")
@@ -65,7 +60,7 @@ def login_to_dice(driver):
 
         logging.info("Step 2: Entering password.")
         password_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "password")))
-        password_input.send_keys(DICE_PASSWORD) # Uses secret
+        password_input.send_keys(dice_password_param) # Uses parameter
         time.sleep(ACTION_DELAY)
 
         logging.info("Clicking final 'Sign In' button.")
@@ -83,6 +78,7 @@ def login_to_dice(driver):
 
 def search_and_apply(driver, job_title, location, worksheet):
     """Searches for jobs, applies filters, and processes listings, logging successes."""
+    # This function remains largely the same internally
     logging.info(f"Starting job search for '{job_title}' in '{location}'.")
     driver.get("https://www.dice.com/dashboard")
 
@@ -132,7 +128,6 @@ def search_and_apply(driver, job_title, location, worksheet):
 
     except TimeoutException:
         logging.error("CRITICAL: Could not find or click an element in the filter panel.")
-        # driver.save_screenshot('FILTERING_FAILED_SCREENSHOT.png') # May not work in Streamlit Cloud easily
         raise
 
     logging.info("Waiting for filtered job list to refresh...")
@@ -174,7 +169,7 @@ def search_and_apply(driver, job_title, location, worksheet):
                     if window_handle != original_window:
                         driver.switch_to.window(window_handle)
                         break
-                time.sleep(10) # Allow new tab to load
+                time.sleep(10) 
 
                 try:
                     shadow_host = WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.CSS_SELECTOR, "apply-button-wc")))
@@ -185,33 +180,31 @@ def search_and_apply(driver, job_title, location, worksheet):
                     next_button = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-next")))
                     next_button.click()
 
-                    submit_button = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-next"))) # Assuming same selector for submit
+                    submit_button = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-next"))) 
                     submit_button.click()
                     logging.info(f"--- SUCCESS: Job '{job_name}' Submitted! ---")
                     log_to_google_sheet(worksheet, job_name)
                     time.sleep(ACTION_DELAY)
                 except TimeoutException:
                     logging.warning(f"Job '{job_name}' is not an 'Easy Apply' job or failed to load. Skipping.")
-                    # driver.save_screenshot(f'JOB_{job_name[:20]}_SKIPPED.png')
                 finally:
                     if len(driver.window_handles) > 1:
                         driver.close()
                     driver.switch_to.window(original_window)
-                    time.sleep(1) # Give time to switch back
+                    time.sleep(1)
             except StaleElementReferenceException:
                 logging.error(f"Stale element error on job {i+1}. Page may have refreshed. Skipping.")
                 continue
             except Exception as e:
                 logging.error(f"An unexpected error occurred on job '{job_name}': {e}")
                 logging.error(traceback.format_exc())
-                # Ensure back to original window if error
                 if driver.current_window_handle != original_window and len(driver.window_handles) > 1:
                     driver.close()
                     driver.switch_to.window(original_window)
                 continue
         try:
             logging.info("All jobs on this page processed. Looking for the 'Next' page button...")
-            next_page_button_xpath = "//span[@aria-label='Next']/ancestor::button[not(@disabled)]" # Check if button is not disabled
+            next_page_button_xpath = "//span[@aria-label='Next']/ancestor::button[not(@disabled)]"
             next_page_button = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, next_page_button_xpath))
             )
@@ -219,7 +212,7 @@ def search_and_apply(driver, job_title, location, worksheet):
             time.sleep(0.5)
             driver.execute_script("arguments[0].click();", next_page_button)
             logging.info("SUCCESS: Clicked 'Next' page. Waiting for new jobs to load...")
-            time.sleep(10) # Increased wait time
+            time.sleep(10)
             page_number += 1
         except TimeoutException:
             logging.info("This is the last page. No 'Next' button found or it's disabled.")
@@ -230,80 +223,59 @@ def search_and_apply(driver, job_title, location, worksheet):
             logging.error(traceback.format_exc())
             break
 
-def start_bot_task(job_title, location, status_placeholder):
+# Modified to accept dice_email, dice_password, and spreadsheet_id from UI
+def start_bot_task(job_title, location, dice_email_ui, dice_password_ui, spreadsheet_id_ui, status_placeholder):
     """Main bot task function"""
     worksheet = None
     try:
         status_placeholder.info("🔗 Connecting to Google Sheets...")
-        # --- Updated Google Sheets Authentication ---
-        # Ensure 'google_credentials' is a dictionary-like object from st.secrets
-        # It should contain the content of your service_account_credentials.json
         if "google_credentials" not in st.secrets:
-            status_placeholder.error("❌ Google credentials not found in Streamlit Secrets.")
+            status_placeholder.error("❌ Google credentials not found in Streamlit Secrets. Please configure them in app settings.")
             logging.error("Google credentials not found in Streamlit Secrets.")
             return
 
-        # The st.secrets["google_credentials"] should already be a dict
-        # if you've set it up correctly in TOML or Streamlit Cloud UI
-        # If it's a string (e.g. if you pasted the whole JSON as one TOML string value), parse it:
-        # google_creds_dict = json.loads(st.secrets["google_credentials_json_str"]) # Example if stored as string
-        google_creds_dict = st.secrets["google_credentials"] # Assuming it's stored as a TOML table
-
+        google_creds_dict = st.secrets["google_credentials"]
         scoped_credentials = Credentials.from_service_account_info(
             google_creds_dict,
             scopes=['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         )
         client = gspread.authorize(scoped_credentials)
-        spreadsheet = client.open_by_key(SPREADSHEET_ID) # SPREADSHEET_ID from secrets
+        spreadsheet = client.open_by_key(spreadsheet_id_ui) # Uses spreadsheet_id from UI
         worksheet = spreadsheet.sheet1
         logging.info("SUCCESS: Connected to Google Sheets.")
         status_placeholder.success("✅ Connected to Google Sheets successfully.")
 
-    except Exception as e: # Catch more specific exceptions if possible
+    except Exception as e:
         logging.error(f"Failed to connect to Google Sheets: {e}")
         logging.error(traceback.format_exc())
         status_placeholder.error(f"❌ Error connecting to Google Sheets: {e}")
         return
 
-    if not (DICE_EMAIL and DICE_PASSWORD and SPREADSHEET_ID):
-        status_placeholder.error("❌ Dice credentials or Spreadsheet ID are missing in Streamlit Secrets.")
-        logging.error("Dice credentials or Spreadsheet ID are missing in Streamlit Secrets.")
-        return
+    # Credentials (dice_email_ui, dice_password_ui, spreadsheet_id_ui) are now passed as arguments
+    # and checked in the UI section before calling this function.
 
-    status_placeholder.info(f"🚀 Starting Bot for: {job_title} in {location}")
+    status_placeholder.info(f"🚀 Starting Bot for: {job_title} in {location} using Dice email: {dice_email_ui}")
     driver = None
     try:
         options = webdriver.ChromeOptions()
-        # --- Options for Streamlit Cloud (headless Browse) ---
         options.add_argument("--headless")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1920x1080") # Standard window size
-        options.add_argument("--disable-dev-shm-usage") # Overcome limited resource problems
-        # --- Original Options ---
+        options.add_argument("--window-size=1920x1080")
+        options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-notifications")
-        # options.add_argument("--start-maximized") # Not applicable in headless
         options.add_experimental_option('excludeSwitches', ['enable-logging'])
-        # options.add_experimental_option("detach", True) # Not for cloud deployment
 
-        # Using webdriver-manager for local, Streamlit Cloud might have its own way or path
-        # For Streamlit Community Cloud, you might need to specify the path if webdriver-manager doesn't work out of the box.
-        # However, often it does work.
         try:
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
         except Exception as e_driver:
             logging.error(f"Failed to initialize Chrome Driver with webdriver-manager: {e_driver}")
-            # Fallback or specific path for Streamlit Cloud if needed (more advanced)
-            # For example, sometimes Chrome and ChromeDriver are at fixed paths on Streamlit Cloud.
-            # This would require checking Streamlit's latest documentation or community forums.
-            # For now, we rely on webdriver-manager.
-            status_placeholder.error("❌ Failed to initialize Chrome Driver. Check logs.")
+            status_placeholder.error(f"❌ Failed to initialize Chrome Driver: {e_driver}. Check logs.")
             return
 
-
         status_placeholder.info("🔐 Logging in to Dice.com...")
-        login_to_dice(driver)
+        login_to_dice(driver, dice_email_ui, dice_password_ui) # Pass UI credentials
 
         status_placeholder.success("✅ Login successful! Processing jobs...")
         search_and_apply(driver, job_title, location, worksheet)
@@ -323,31 +295,51 @@ def start_bot_task(job_title, location, status_placeholder):
 st.title("🤖 Dice.com Job Application Bot")
 st.markdown("---")
 
-# Input sections
+st.subheader("🎯 Job Search Criteria")
 col1, col2 = st.columns(2)
-
 with col1:
-    st.subheader("📋 Job Title")
-    job_title = st.text_input("Enter job title:", placeholder="e.g., Software Engineer, Data Analyst", key="job_title")
-
+    job_title_ui = st.text_input("Enter job title:", placeholder="e.g., Software Engineer", key="job_title_ui")
 with col2:
-    st.subheader("📍 Location")
-    location = st.text_input("Enter location:", placeholder="e.g., New York, Remote", key="location")
+    location_ui = st.text_input("Enter location:", placeholder="e.g., New York, Remote", key="location_ui")
+
+st.markdown("---")
+st.subheader("🎲 Dice.com Credentials")
+col3, col4 = st.columns(2)
+with col3:
+    dice_email_ui_input = st.text_input("Dice Email:", placeholder="your.email@example.com", key="dice_email_ui")
+with col4:
+    dice_password_ui_input = st.text_input("Dice Password:", type="password", key="dice_password_ui")
+
+st.markdown("---")
+st.subheader("📊 Google Sheet Configuration")
+# Using the provided spreadsheet ID as a default value
+spreadsheet_id_ui_input = st.text_input("Google Spreadsheet ID:", value="1ML4bC7XVwQys-MR0TH8ujk5Fu3RtLxyUfJLC92Gzxqk", key="spreadsheet_id_ui")
+
 
 st.markdown("---")
 
 # Search button
 if st.button("🔍 Find and Apply for Jobs", type="primary", use_container_width=True):
-    if not job_title.strip() or not location.strip():
-        st.error("❌ Please enter both Job Title and Location.")
+    # Validate all new inputs
+    if not (job_title_ui.strip() and location_ui.strip() and
+            dice_email_ui_input.strip() and dice_password_ui_input.strip() and
+            spreadsheet_id_ui_input.strip()):
+        st.error("❌ Please fill in all fields: Job Title, Location, Dice Email, Dice Password, and Spreadsheet ID.")
     else:
         status_placeholder = st.empty()
         try:
-            start_bot_task(job_title.strip(), location.strip(), status_placeholder)
-        except Exception as e: # Catch errors from start_bot_task if any bubble up
+            start_bot_task(
+                job_title_ui.strip(),
+                location_ui.strip(),
+                dice_email_ui_input.strip(),
+                dice_password_ui_input.strip(), # Password is sent as is
+                spreadsheet_id_ui_input.strip(),
+                status_placeholder
+            )
+        except Exception as e:
             st.error(f"❌ An error occurred during bot execution: {str(e)}")
             st.exception(e)
 
 # Footer
 st.markdown("---")
-st.markdown("This bot uses credentials and configurations stored securely via Streamlit Secrets.")
+st.markdown("Google Service Account credentials for Sheets are loaded securely from Streamlit Secrets.")

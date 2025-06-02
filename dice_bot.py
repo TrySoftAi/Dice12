@@ -1,5 +1,5 @@
 import streamlit as st
-import json # Needed for loading Google credentials from string if stored as a single TOML string
+import json
 
 # --- Streamlit Configuration (MUST be first) ---
 st.set_page_config(page_title="Dice.com Job Application Bot", page_icon="🤖", layout="wide")
@@ -64,43 +64,65 @@ def login_to_dice(driver, dice_email_param, dice_password_param):
         final_login_button.click()
 
         logging.info("Verifying login success by checking for dashboard URL...")
-        WebDriverWait(driver, 20).until(EC.url_contains("dashboard"))
-        time.sleep(ACTION_DELAY)
-        logging.info("SUCCESS: Login verified.")
+        # Wait for URL to contain 'dashboard' but NOT the login redirect that includes 'profiles' if that's an issue
+        WebDriverWait(driver, 20).until(
+            lambda d: "dashboard" in d.current_url and "profiles" not in d.current_url 
+                      if "login" in d.current_url else "dashboard" in d.current_url
+        )
+        logging.info(f"Landed on URL: {driver.current_url} after login attempt.")
+        time.sleep(ACTION_DELAY) # Allow page to settle
+        logging.info("SUCCESS: Login verified (or at least past login page).")
+
     except (TimeoutException, NoSuchElementException):
-        logging.error("A timeout or element-not-found error occurred during login.")
+        logging.error(f"A timeout or element-not-found error occurred during login. Current URL: {driver.current_url}")
         logging.error(traceback.format_exc())
         raise
 
 def search_and_apply(driver, job_title, location, worksheet):
     """Searches for jobs, applies filters, and processes listings, logging successes."""
     logging.info(f"Starting job search for '{job_title}' in '{location}'.")
-    driver.get("https://www.dice.com/dashboard") # Navigate to dashboard (or search page directly if URL is known)
+    
+    # Attempt to navigate to a more specific search page or ensure dashboard is loaded
+    # It seems after login, it might redirect to /dashboard/login?redirectURL=/dashboard/profiles
+    # We need to get to the actual job search interface.
+    # Let's try navigating to the base dashboard and then ensure we are on a page where search is possible.
+    driver.get("https://www.dice.com/dashboard")
+    logging.info(f"Navigated to /dashboard. Current URL: {driver.current_url}")
+    time.sleep(2) # Give it a moment to redirect if it's going to
+
+    # Add a wait for a known element on the *actual* job search dashboard
+    # This is a placeholder - you need to find a real element on the page that indicates the search form is ready
+    try:
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.XPATH, "//*[contains(text(),'Recommended For You')] | //input[@name='q'] | //*[@data-testid='job-search-search-bar-search-button']")) 
+            # The above tries to find common dashboard text, the old search input, or the search button
+        )
+        logging.info(f"Suspected dashboard / search page loaded. Current URL: {driver.current_url}")
+    except TimeoutException:
+        logging.error(f"Timeout waiting for main dashboard elements. Current URL: {driver.current_url}")
+        # driver.save_screenshot("debug_dashboard_load_failed.png") # For local debugging
+        raise Exception("Failed to load the expected Dice dashboard page for job searching.")
+
 
     logging.info("Locating search fields on the dashboard.")
-    
-    # !!! --- USER ACTION REQUIRED: VERIFY AND UPDATE SELECTORS BELOW --- !!!
-    # The TimeoutException occurred here. You need to manually inspect Dice.com's dashboard
-    # after logging in to find the correct current selectors for these fields.
-    # Example: If the job title field now has id="jobSearch", you'd use (By.ID, "jobSearch")
-    
     try:
         # TODO: USER - Verify this selector. Is 'name="q"' still correct for the job title input?
+        # Or find a more robust selector e.g., by data-testid or a unique ID.
         job_title_selector = (By.NAME, "q") 
-        job_title_field = WebDriverWait(driver, 20).until(EC.presence_of_element_located(job_title_selector)) # Increased wait time a bit
+        # Alternative if 'q' is common: job_title_selector = (By.XPATH, "//input[@placeholder='Job title, skill, or company']")
+        job_title_field = WebDriverWait(driver, 20).until(EC.visibility_of_element_located(job_title_selector))
         logging.info(f"Job title field found using {job_title_selector}")
 
         # TODO: USER - Verify this selector. Is 'name="location"' still correct for the location input?
         location_selector = (By.NAME, "location")
-        location_field = WebDriverWait(driver, 10).until(EC.presence_of_element_located(location_selector))
+        # Alternative: location_selector = (By.XPATH, "//input[@placeholder='City, state, or zip code']")
+        location_field = WebDriverWait(driver, 10).until(EC.visibility_of_element_located(location_selector))
         logging.info(f"Location field found using {location_selector}")
 
     except TimeoutException as e:
         logging.error(f"Timeout finding search fields. Page might have changed or not loaded correctly. Current URL: {driver.current_url}")
         # driver.save_screenshot("debug_search_fields_timeout.png") # Helpful for local debugging
-        raise # Re-raise the exception to be caught by start_bot_task
-
-    # --- End of USER ACTION REQUIRED section for selectors ---
+        raise 
 
     job_title_field.clear()
     job_title_field.send_keys(job_title)
@@ -111,18 +133,13 @@ def search_and_apply(driver, job_title, location, worksheet):
     time.sleep(0.5)
 
     logging.info("Clicking the main search button.")
-    # TODO: USER - Verify this selector for the search button if issues persist.
     search_button_selector = (By.CSS_SELECTOR, "[data-testid='job-search-search-bar-search-button']")
     search_button = WebDriverWait(driver, 15).until(EC.element_to_be_clickable(search_button_selector))
     search_button.click()
 
     logging.info("Pausing for 5 seconds to let the results page load...")
-    time.sleep(5) # Adjust if search results take longer to appear
-
-    # ... (rest of the search_and_apply function remains the same as before) ...
-    # Make sure selectors inside this function for filters, job links, next button, etc., are also still valid.
-    # I'll keep them as they were, but be aware they might also need updates if Dice.com changed significantly.
-
+    time.sleep(5)
+    # ... (rest of the function as before)
     try:
         logging.info("Attempting to click 'All filters' button...")
         all_filters_button_selector = (By.XPATH, "//button[contains(., 'All filters')]")
@@ -143,14 +160,16 @@ def search_and_apply(driver, job_title, location, worksheet):
         time.sleep(ACTION_DELAY)
 
         logging.info("Closing the filter menu...")
-        close_button_selector = (By.CSS_SELECTOR, "button[data-testid='undefined-close-button']")
+        close_button_selector = (By.CSS_SELECTOR, "button[data-testid='undefined-close-button']") # This data-testid seems unstable
+        # TODO: USER - Find a more reliable selector for the filter panel's close button.
+        # Example: close_button_selector = (By.XPATH, "//div[@aria-label='Filter modal']//button[@aria-label='Close']")
         close_button = WebDriverWait(driver, 15).until(EC.element_to_be_clickable(close_button_selector))
         close_button.click()
         logging.info("Filters applied and panel closed successfully.")
 
     except TimeoutException:
         logging.warning("Could not find or click an element in the filter panel. Proceeding without all filters if some were applied.")
-        # Not raising here to allow continuation if, for example, filters were already applied or not strictly necessary
+
 
     logging.info("Waiting for filtered job list to refresh...")
     time.sleep(3)
@@ -163,16 +182,15 @@ def search_and_apply(driver, job_title, location, worksheet):
             WebDriverWait(driver, 10).until(EC.presence_of_element_located(job_links_selector))
         except TimeoutException:
             logging.info("No more job links found or page did not load as expected. Ending process for this search.")
-            break # Exit the while loop if no job links are found
+            break 
 
-        job_elements = driver.find_elements(job_links_selector[0], job_links_selector[1]) # This line had an error before, ensure it's correct now
+        job_elements = driver.find_elements(job_links_selector[0], job_links_selector[1]) 
         job_count = len(job_elements)
         logging.info(f"Found {job_count} jobs on this page. Starting application process...")
 
         if job_count == 0:
             logging.info("No jobs found on this page to process.")
-            # Check for "next" button even if no jobs, in case of empty intermediate pages
-            pass # Will proceed to "next page" check
+            pass 
 
         original_window = driver.current_window_handle
 
@@ -281,16 +299,24 @@ def start_bot_task(job_title, location, dice_email_ui, dice_password_ui, spreads
     driver = None
     try:
         options = webdriver.ChromeOptions()
-        options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1920x1080")
-        options.add_argument("--disable-dev-shm-usage")
+        
+        # --- WebDriver Options ---
+        # Comment out --headless to see the browser locally. 
+        # MUST be enabled for Streamlit Cloud deployment.
+        # options.add_argument("--headless") 
+        
+        # These are generally good for both local (even if visible) and cloud headless
+        options.add_argument("--no-sandbox") # Bypasses OS security model, REQUIRED for many Linux environments including Streamlit Cloud
+        options.add_argument("--disable-dev-shm-usage") # Overcomes limited resource problems in Docker/Linux
+        options.add_argument("--disable-gpu") # Often necessary for headless, may not harm visible mode
+        options.add_argument("--window-size=1920x1080") # Good for consistency
         options.add_argument("--disable-notifications")
         options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        # If running LOCALLY and you want the browser to stay open after script finishes (for debugging):
+        # options.add_experimental_option("detach", True)
+
 
         try:
-            # Explicitly tell webdriver-manager to use the CHROMIUM browser type
             service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
             driver = webdriver.Chrome(service=service, options=options)
         except Exception as e_driver:
@@ -312,6 +338,10 @@ def start_bot_task(job_title, location, dice_email_ui, dice_password_ui, spreads
         logging.critical(traceback.format_exc())
     finally:
         if driver:
+            # If using options.add_experimental_option("detach", True) for local debugging,
+            # you might want to conditionally not quit, or quit after a delay.
+            # For normal operation (especially cloud), always quit.
+            time.sleep(5) # Optional: keep browser open for 5s locally if not detaching
             driver.quit()
             logging.info("Browser closed.")
 
